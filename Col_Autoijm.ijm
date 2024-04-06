@@ -3,8 +3,8 @@ output = getDirectory("results");
 list = getFileList(input);
 setBatchMode(true);
 
-  for (i = 0; i < list.length; i++){
-  	open(input+list[i]);
+  for (j = 0; j < list.length; j++){
+  	open(input+list[j]);
   	imageID = getImageID();
 run("Enhance Contrast...", "saturated=0.35 normalize process_all");
 setAutoThreshold("Default dark no-reset");
@@ -326,6 +326,6 @@ for (i = 0; i < windowTitles.length; i++) {
     }
 }
 
-saveAs("Results", output+i+"-col.csv");
+saveAs("Results", output+j+"-col.csv");
 run("Close All");
   }
