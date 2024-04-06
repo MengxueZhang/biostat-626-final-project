@@ -1,3 +1,4 @@
+run("Clear Results");
 input = getDirectory("input folder");
 output = getDirectory("results");
 list = getFileList(input);
@@ -326,6 +327,7 @@ for (i = 0; i < windowTitles.length; i++) {
     }
 }
 
-saveAs("Results", output+j+"-col.csv");
+
 run("Close All");
   }
+saveAs("Results", "/Users/chunhuigu/Desktop/train/Col/Col_sum.csv");
