@@ -1,0 +1,1506 @@
+---
+title: "626_project"
+author: "Chunhuigu"
+date: "2024-04-07"
+output: html_document
+---
+
+
+**Multicolinearity and Normalization- 1**. **partial data, threshold =5**
+
+```{r}
+library(ISLR)
+library(MASS) # For lda function
+library(caret)
+library(e1071)
+library(caret)
+library(readxl)
+
+pd <- read_excel("/Users/chunhuigu/Desktop/train/Aggregated_data_test.xlsx")
+str(pd[, -1, drop = FALSE])
+pd_x <- as.data.frame(pd[, -1])
+vif_results <- usdm::vifstep(pd_x, th=5)
+vif_results
+vif_final <- vif_results@results
+final_variable_names <- vif_final$Variables
+final_data <- pd_x[, final_variable_names, drop = FALSE]
+
+pre_proc_val <- preProcess(final_data, method = c("center", "scale"))
+normalized_x <- predict(pre_proc_val, final_data)
+pd1 <- cbind(pd[,1], normalized_x)
+```
+
+**Model Selection - 1** 
+
+```{r}
+library(caret)
+library(nnet) # 神经网络模型
+
+# 添加神经网络到模型方法列表
+model_methods <- c(
+  least_squares = "lm",
+  bayes = "bayesglm",
+  lasso = "glmnet",
+  ridge = "glmnet",
+  knn = "knn",
+  nnet = "nnet" # 添加神经网络模型
+)
+
+# 初始化一个空列表来存储结果
+results <- list()
+
+# 设置交叉验证的训练控制
+train_control <- trainControl(method = "cv", number = 10, savePredictions = "final")
+
+# 执行10折交叉验证并计算测试集的RMSE和MAE
+perform_cv <- function(model_method, data, outcome_var, ...) {
+  set.seed(123) # 确保结果可重复
+  
+  # 训练模型，使用10折交叉验证
+  model <- train(reformulate(". - survival_time", response = outcome_var), 
+                 data = data, 
+                 method = model_method, 
+                 trControl = train_control,
+                 ...)
+  
+  # 提取测试集的预测
+  test_predictions <- model$pred[model$pred$Resample != "Resample01",]
+  
+  # 计算测试集的RMSE和MAE
+  rmse_test <- RMSE(test_predictions$pred, test_predictions$obs)
+  mae_test <- MAE(test_predictions$pred, test_predictions$obs)
+  
+  # 返回测试集的RMSE和MAE
+  return(c(RMSE = rmse_test, MAE = mae_test))
+}
+
+# 对每个回归模型应用函数并存储测试RMSE和MAE
+for (method_name in names(model_methods)) {
+  if (method_name %in% c("lasso", "ridge")) {
+    # 对lasso和ridge回归，指定alpha值
+    alpha_value <- ifelse(method_name == "lasso", 1, 0)
+    results[[method_name]] <- perform_cv(model_methods[[method_name]], pd1, "survival_time", 
+                                         tuneLength = 3,
+                                         tuneGrid = expand.grid(alpha = alpha_value, lambda = seq(0.001, 0.1, length = 10)))
+  } else if (method_name == "nnet") {
+    # 对神经网络，设置一个合适的隐藏层节点数和最大迭代次数
+    results[[method_name]] <- perform_cv(model_methods[[method_name]], pd1, "survival_time",
+                                         trace = FALSE,
+                                         maxit = 1000,
+                                         linout = TRUE, # 线性输出对于回归问题
+                    
+                                         tuneLength = 3)
+  } else {
+    # 对其他方法，不需要指定额外参数
+    results[[method_name]] <- perform_cv(model_methods[[method_name]], pd1, "survival_time")
+  }
+}
+
+# Add Poisson regression manually using a custom model specification in caret
+set.seed(123)
+poisson_model <- train(survival_time ~ ., data = pd1, method = "glm", family = "poisson", trControl = train_control)
+poisson_test_predictions <- poisson_model$pred[poisson_model$pred$Resample != "Resample01",]
+results[["poisson"]] <- c(RMSE = RMSE(poisson_test_predictions$pred, poisson_test_predictions$obs),
+                          MAE = MAE(poisson_test_predictions$pred, poisson_test_predictions$obs))
+
+# Compile test RMSE and MAE results into a data frame for comparison
+results_df <- data.frame(Model = names(results), t(sapply(results, unlist)))
+rownames(results_df) <- NULL # Reset row names to default
+
+# Output results
+print(results_df)
+```
+**train deep neural network -1**
+
+```{r}
+library(keras)
+
+# 确定特征数量
+num_features <- ncol(pd1) - 1
+
+# 定义模型
+model <- keras_model_sequential() %>%
+  layer_dense(units = 64, activation = 'relu', input_shape = c(num_features)) %>%
+  layer_dense(units = 64, activation = 'relu') %>%
+  layer_dense(units = 1)
+
+# 编译模型，使用标准的RMSprop优化器
+model %>% compile(
+  loss = 'mean_squared_error',
+  optimizer = optimizer_rmsprop(),  # 使用标准的RMSprop优化器
+  metrics = c('mean_absolute_error')
+)
+
+# 10折交叉验证准备
+k <- 10  # 折数
+fold_size <- nrow(pd1) / k
+cvscores_rmse <- vector()
+cvscores_mae <- vector()
+
+for (i in 1:k) {
+  # 分割验证集和训练集
+  val_indices <- ((i - 1) * fold_size + 1):(i * fold_size)
+  val_data <- pd1[val_indices, ]
+  train_data <- pd1[-val_indices, ]
+  
+  # 训练模型
+  history <- model %>% fit(
+    x = as.matrix(train_data[, -1]),  # 特征数据，移除第一列（目标变量）
+    y = train_data[, 1],              # 目标变量
+    epochs = 100,
+    batch_size = 10,
+    verbose = 0
+  )
+  
+  # 评估模型
+  scores <- model %>% evaluate(
+    x = as.matrix(val_data[, -1]),
+    y = val_data[, 1],
+    verbose = 0
+  )
+
+  # 判断scores是否为list并且包含'loss'和'mean_absolute_error'
+  if (is.list(scores) && "loss" %in% names(scores)) {
+    rmse <- sqrt(scores$loss)
+    mae <- scores$mean_absolute_error
+  } else {  # 如果scores不是list，直接使用索引
+    rmse <- sqrt(scores[1])
+    mae <- scores[2]
+  }
+  
+  # 将结果添加到vectors中
+  cvscores_rmse <- c(cvscores_rmse, rmse)
+  cvscores_mae <- c(cvscores_mae, mae)
+}
+
+# 计算平均RMSE和MAE
+mean_rmse <- mean(cvscores_rmse)
+mean_mae <- mean(cvscores_mae)
+
+# 输出结果
+cat("平均RMSE:", mean_rmse, "\n")
+cat("平均MAE:", mean_mae, "\n")
+
+```
+
+**find the best model parameters - 1**
+
+```{r}
+library(keras)
+library(caret)
+
+# Assume pd1 is your full dataset with the first column being the target variable.
+num_features <- ncol(pd1) - 1  # Number of features
+
+# Define the grid of hyperparameters
+#grid <- expand.grid(
+#  units = c(50, 100),
+#  dropout_rate = c(0.2, 0.4),
+#  learning_rate = c(0.001, 0.01),
+#  stringsAsFactors = FALSE
+#)
+
+grid <- expand.grid(
+  units = seq(50, 200, by = 50),         # Number of units in each dense layer
+  dropout_rate = seq(0.1, 0.5, by = 0.1), # Dropout rates
+  learning_rate = c(0.001, 0.005, 0.01), # Learning rates
+  stringsAsFactors = FALSE
+)
+
+
+# Function to create a Keras model with given hyperparameters
+create_model <- function(units, dropout_rate, learning_rate) {
+  model <- keras_model_sequential() %>%
+    layer_dense(units = units, activation = 'relu', input_shape = c(num_features)) %>%
+    layer_dropout(rate = dropout_rate) %>%
+    layer_dense(units = units, activation = 'relu') %>%
+    layer_dropout(rate = dropout_rate) %>%
+    layer_dense(units = 1)
+  
+  model %>% compile(
+    optimizer = optimizer_adam(lr = learning_rate),
+    loss = 'mean_squared_error',
+    metrics = c('mean_absolute_error')
+  )
+  
+  return(model)
+}
+
+# Prepare the dataset
+set.seed(123) # For reproducibility
+folds <- createFolds(pd1[, 1], k = 10)
+cv_results <- lapply(seq_along(folds), function(k) {
+  # Split the data into training and validation sets
+  fold <- folds[[k]]
+  training_indices <- setdiff(seq_len(nrow(pd1)), fold)
+  train_data <- pd1[training_indices, ]
+  val_data <- pd1[fold, ]
+  
+  # Prepare the data for the Keras model
+  x_train <- as.matrix(train_data[, -1])
+  y_train <- train_data[, 1]
+  x_val <- as.matrix(val_data[, -1])
+  y_val <- val_data[, 1]
+  
+  # Initialize a list to store the results for each set of parameters
+  hyperparam_results <- list()
+  
+  for(i in seq_len(nrow(grid))) {
+    # Get the parameters for this iteration
+    params <- grid[i, ]
+    
+    # Create and train the model
+    model <- create_model(params$units, params$dropout_rate, params$learning_rate)
+    history <- model %>% fit(
+      x_train, y_train,
+      epochs = 100,
+      batch_size = 10,
+      validation_data = list(x_val, y_val),
+      verbose = 0
+    )
+    
+    # Get the best validation MAE from the training history
+    val_mae <- min(history$metrics$val_mean_absolute_error)
+    
+    # Store the results for this set of hyperparameters
+    hyperparam_results[[i]] <- list(params = params, val_mae = val_mae)
+  }
+  
+  # Return the results for this fold
+  return(hyperparam_results)
+})
+
+# Calculate the mean validation MAE across all folds for each set of hyperparameters
+mean_val_mae_per_hyperparam <- sapply(seq_len(nrow(grid)), function(i) {
+  mean(sapply(cv_results, function(fold_results) fold_results[[i]]$val_mae))
+})
+
+# Determine the set of hyperparameters with the best mean validation MAE
+best_hyperparams_index <- which.min(mean_val_mae_per_hyperparam)
+best_hyperparams <- grid[best_hyperparams_index, ]
+best_val_mae <- mean_val_mae_per_hyperparam[best_hyperparams_index]
+
+# Print out the best hyperparameters and corresponding validation MAE
+print(best_hyperparams)
+print(best_val_mae)
+
+```
+
+**realize the model wth the best parameters**
+
+```{r}
+library(keras)
+library(caret)
+
+# Assume pd1 is your full dataset with the first column being the target variable.
+num_features <- ncol(pd1) - 1  # Number of features
+
+# Define the best hyperparameters found previously
+best_units <- 100
+best_dropout_rate <- 0.2
+best_learning_rate <- 0.001
+
+# Function to create and compile the Keras model with the best hyperparameters
+create_best_model <- function() {
+  model <- keras_model_sequential() %>%
+    layer_dense(units = best_units, activation = 'relu', input_shape = c(num_features)) %>%
+    layer_dropout(rate = best_dropout_rate) %>%
+    layer_dense(units = best_units, activation = 'relu') %>%
+    layer_dropout(rate = best_dropout_rate) %>%
+    layer_dense(units = 1)
+
+  model %>% compile(
+    optimizer = optimizer_adam(lr = best_learning_rate),
+    loss = 'mean_squared_error',
+    metrics = c('mean_absolute_error')
+  )
+  
+  return(model)
+}
+
+# Prepare the dataset for 10-fold cross-validation
+set.seed(123) # For reproducibility
+folds <- createFolds(pd1[, 1], k = 10)
+cv_scores <- list(rmse = numeric(length(folds)), mae = numeric(length(folds)))
+
+# Perform 10-fold cross-validation
+for(k in seq_along(folds)) {
+  # Split the data into training and validation sets
+  fold <- folds[[k]]
+  training_indices <- setdiff(seq_len(nrow(pd1)), fold)
+  train_data <- pd1[training_indices, ]
+  val_data <- pd1[fold, ]
+  
+  # Prepare the data for the Keras model
+  x_train <- as.matrix(train_data[, -1])
+  y_train <- train_data[, 1]
+  x_val <- as.matrix(val_data[, -1])
+  y_val <- val_data[, 1]
+  
+  # Create and train the model
+  model <- create_best_model()
+  history <- model %>% fit(
+    x_train, y_train,
+    epochs = 100,
+    batch_size = 10,
+    validation_data = list(x_val, y_val),
+    verbose = 0
+  )
+  
+  # Evaluate the model
+  scores <- model %>% evaluate(x_val, y_val, verbose = 0)
+  
+  # Handle evaluation results based on whether 'scores' is a vector or a single value
+  rmse <- if (is.numeric(scores) && length(scores) == 1) {
+    # 'scores' is a single numeric value (the loss)
+    sqrt(scores)
+  } else {
+    # 'scores' is a named vector and contains 'loss'
+    sqrt(scores['loss'])
+  }
+  
+  mae <- if (is.numeric(scores) && length(scores) > 1 && "mean_absolute_error" %in% names(scores)) {
+    scores['mean_absolute_error']
+  } else {
+    # Get MAE from the last epoch in the training history
+    history$metrics$val_mean_absolute_error[length(history$metrics$val_mean_absolute_error)]
+  }
+  
+  # Store the RMSE and MAE for this fold
+  cv_scores$rmse[k] <- rmse
+  cv_scores$mae[k] <- mae
+}
+
+# Calculate the average RMSE and MAE across all folds
+mean_rmse <- mean(cv_scores$rmse)
+mean_mae <- mean(cv_scores$mae)
+
+# Print out the average RMSE and MAE
+cat("Average RMSE across folds:", mean_rmse, "\n")
+cat("Average MAE across folds:", mean_mae, "\n")
+
+
+```
+**Multicolinearity - 2** **partial data, th = 10**
+
+```{r}
+library(ISLR)
+library(MASS) # For lda function
+library(caret)
+library(e1071)
+library(caret)
+library(readxl)
+
+pd <- read_excel("/Users/chunhuigu/Desktop/train/Aggregated_data_test.xlsx")
+str(pd[, -1, drop = FALSE])
+pd_x <- as.data.frame(pd[, -1])
+vif_results2 <- usdm::vifstep(pd_x, th=10)
+vif_results2
+vif_final2 <- vif_results2@results
+final_variable_names2 <- vif_final2$Variables
+final_data2 <- pd_x[, final_variable_names2, drop = FALSE]
+pre_proc_val2 <- preProcess(final_data2, method = c("center", "scale"))
+normalized_x2 <- predict(pre_proc_val2, final_data2)
+pd2 <- cbind(pd[,1], normalized_x2)
+```
+
+**Model Selection - 2**
+
+```{r}
+library(caret)
+library(nnet) # 神经网络模型
+
+# 添加神经网络到模型方法列表
+model_methods <- c(
+  least_squares = "lm",
+  bayes = "bayesglm",
+  lasso = "glmnet",
+  ridge = "glmnet",
+  knn = "knn",
+  nnet = "nnet" # 添加神经网络模型
+)
+
+# 初始化一个空列表来存储结果
+results <- list()
+
+# 设置交叉验证的训练控制
+train_control <- trainControl(method = "cv", number = 10, savePredictions = "final")
+
+# 执行10折交叉验证并计算测试集的RMSE和MAE
+perform_cv <- function(model_method, data, outcome_var, ...) {
+  set.seed(123) # 确保结果可重复
+  
+  # 训练模型，使用10折交叉验证
+  model <- train(reformulate(". - survival_time", response = outcome_var), 
+                 data = data, 
+                 method = model_method, 
+                 trControl = train_control,
+                 ...)
+  
+  # 提取测试集的预测
+  test_predictions <- model$pred[model$pred$Resample != "Resample01",]
+  
+  # 计算测试集的RMSE和MAE
+  rmse_test <- RMSE(test_predictions$pred, test_predictions$obs)
+  mae_test <- MAE(test_predictions$pred, test_predictions$obs)
+  
+  # 返回测试集的RMSE和MAE
+  return(c(RMSE = rmse_test, MAE = mae_test))
+}
+
+# 对每个回归模型应用函数并存储测试RMSE和MAE
+for (method_name in names(model_methods)) {
+  if (method_name %in% c("lasso", "ridge")) {
+    # 对lasso和ridge回归，指定alpha值
+    alpha_value <- ifelse(method_name == "lasso", 1, 0)
+    results[[method_name]] <- perform_cv(model_methods[[method_name]], pd1, "survival_time", 
+                                         tuneLength = 3,
+                                         tuneGrid = expand.grid(alpha = alpha_value, lambda = seq(0.001, 0.1, length = 10)))
+  } else if (method_name == "nnet") {
+    # 对神经网络，设置一个合适的隐藏层节点数和最大迭代次数
+    results[[method_name]] <- perform_cv(model_methods[[method_name]], pd1, "survival_time",
+                                         trace = FALSE,
+                                         maxit = 1000,
+                                         linout = TRUE, # 线性输出对于回归问题
+                    
+                                         tuneLength = 3)
+  } else {
+    # 对其他方法，不需要指定额外参数
+    results[[method_name]] <- perform_cv(model_methods[[method_name]], pd1, "survival_time")
+  }
+}
+
+# Add Poisson regression manually using a custom model specification in caret
+set.seed(123)
+poisson_model <- train(survival_time ~ ., data = pd2, method = "glm", family = "poisson", trControl = train_control)
+poisson_test_predictions <- poisson_model$pred[poisson_model$pred$Resample != "Resample01",]
+results[["poisson"]] <- c(RMSE = RMSE(poisson_test_predictions$pred, poisson_test_predictions$obs),
+                          MAE = MAE(poisson_test_predictions$pred, poisson_test_predictions$obs))
+
+# Compile test RMSE and MAE results into a data frame for comparison
+results_df <- data.frame(Model = names(results), t(sapply(results, unlist)))
+rownames(results_df) <- NULL # Reset row names to default
+
+# Output results
+print(results_df)
+```
+
+**train deep neural network - 2**
+
+```{r}
+library(keras)
+
+# 确定特征数量
+num_features <- ncol(pd2) - 1
+
+# 定义模型
+model <- keras_model_sequential() %>%
+  layer_dense(units = 64, activation = 'relu', input_shape = c(num_features)) %>%
+  layer_dense(units = 64, activation = 'relu') %>%
+  layer_dense(units = 1)
+
+# 编译模型，使用标准的RMSprop优化器
+model %>% compile(
+  loss = 'mean_squared_error',
+  optimizer = optimizer_rmsprop(),  # 使用标准的RMSprop优化器
+  metrics = c('mean_absolute_error')
+)
+
+# 10折交叉验证准备
+k <- 10  # 折数
+fold_size <- nrow(pd2) / k
+cvscores_rmse <- vector()
+cvscores_mae <- vector()
+
+for (i in 1:k) {
+  # 分割验证集和训练集
+  val_indices <- ((i - 1) * fold_size + 1):(i * fold_size)
+  val_data <- pd2[val_indices, ]
+  train_data <- pd2[-val_indices, ]
+  
+  # 训练模型
+  history <- model %>% fit(
+    x = as.matrix(train_data[, -1]),  # 特征数据，移除第一列（目标变量）
+    y = train_data[, 1],              # 目标变量
+    epochs = 100,
+    batch_size = 10,
+    verbose = 0
+  )
+  
+  # 评估模型
+  scores <- model %>% evaluate(
+    x = as.matrix(val_data[, -1]),
+    y = val_data[, 1],
+    verbose = 0
+  )
+
+  # 判断scores是否为list并且包含'loss'和'mean_absolute_error'
+  if (is.list(scores) && "loss" %in% names(scores)) {
+    rmse <- sqrt(scores$loss)
+    mae <- scores$mean_absolute_error
+  } else {  # 如果scores不是list，直接使用索引
+    rmse <- sqrt(scores[1])
+    mae <- scores[2]
+  }
+  
+  # 将结果添加到vectors中
+  cvscores_rmse <- c(cvscores_rmse, rmse)
+  cvscores_mae <- c(cvscores_mae, mae)
+}
+
+# 计算平均RMSE和MAE
+mean_rmse <- mean(cvscores_rmse)
+mean_mae <- mean(cvscores_mae)
+
+# 输出结果
+cat("平均RMSE:", mean_rmse, "\n")
+cat("平均MAE:", mean_mae, "\n")
+
+```
+
+**find the best model parameters - 2**
+
+```{r}
+library(keras)
+library(caret)
+
+# Assume pd1 is your full dataset with the first column being the target variable.
+num_features <- ncol(pd2) - 1  # Number of features
+
+# Define the grid of hyperparameters
+#grid <- expand.grid(
+#  units = c(50, 100),
+#  dropout_rate = c(0.2, 0.4),
+#  learning_rate = c(0.001, 0.01),
+#  stringsAsFactors = FALSE
+#)
+
+grid <- expand.grid(
+  units = seq(50, 200, by = 50),         # Number of units in each dense layer
+  dropout_rate = seq(0.1, 0.5, by = 0.1), # Dropout rates
+  learning_rate = c(0.001, 0.005, 0.01), # Learning rates
+  stringsAsFactors = FALSE
+)
+
+
+# Function to create a Keras model with given hyperparameters
+create_model <- function(units, dropout_rate, learning_rate) {
+  model <- keras_model_sequential() %>%
+    layer_dense(units = units, activation = 'relu', input_shape = c(num_features)) %>%
+    layer_dropout(rate = dropout_rate) %>%
+    layer_dense(units = units, activation = 'relu') %>%
+    layer_dropout(rate = dropout_rate) %>%
+    layer_dense(units = 1)
+  
+  model %>% compile(
+    optimizer = optimizer_adam(lr = learning_rate),
+    loss = 'mean_squared_error',
+    metrics = c('mean_absolute_error')
+  )
+  
+  return(model)
+}
+
+# Prepare the dataset
+set.seed(123) # For reproducibility
+folds <- createFolds(pd2[, 1], k = 10)
+cv_results <- lapply(seq_along(folds), function(k) {
+  # Split the data into training and validation sets
+  fold <- folds[[k]]
+  training_indices <- setdiff(seq_len(nrow(pd2)), fold)
+  train_data <- pd2[training_indices, ]
+  val_data <- pd2[fold, ]
+  
+  # Prepare the data for the Keras model
+  x_train <- as.matrix(train_data[, -1])
+  y_train <- train_data[, 1]
+  x_val <- as.matrix(val_data[, -1])
+  y_val <- val_data[, 1]
+  
+  # Initialize a list to store the results for each set of parameters
+  hyperparam_results <- list()
+  
+  for(i in seq_len(nrow(grid))) {
+    # Get the parameters for this iteration
+    params <- grid[i, ]
+    
+    # Create and train the model
+    model <- create_model(params$units, params$dropout_rate, params$learning_rate)
+    history <- model %>% fit(
+      x_train, y_train,
+      epochs = 100,
+      batch_size = 10,
+      validation_data = list(x_val, y_val),
+      verbose = 0
+    )
+    
+    # Get the best validation MAE from the training history
+    val_mae <- min(history$metrics$val_mean_absolute_error)
+    
+    # Store the results for this set of hyperparameters
+    hyperparam_results[[i]] <- list(params = params, val_mae = val_mae)
+  }
+  
+  # Return the results for this fold
+  return(hyperparam_results)
+})
+
+# Calculate the mean validation MAE across all folds for each set of hyperparameters
+mean_val_mae_per_hyperparam <- sapply(seq_len(nrow(grid)), function(i) {
+  mean(sapply(cv_results, function(fold_results) fold_results[[i]]$val_mae))
+})
+
+# Determine the set of hyperparameters with the best mean validation MAE
+best_hyperparams_index <- which.min(mean_val_mae_per_hyperparam)
+best_hyperparams <- grid[best_hyperparams_index, ]
+best_val_mae <- mean_val_mae_per_hyperparam[best_hyperparams_index]
+
+# Print out the best hyperparameters and corresponding validation MAE
+print(best_hyperparams)
+print(best_val_mae)
+
+```
+
+**realize the model wth the best parameters - 2**
+
+```{r}
+library(keras)
+library(caret)
+
+# Assume pd1 is your full dataset with the first column being the target variable.
+num_features <- ncol(pd2) - 1  # Number of features
+
+# Define the best hyperparameters found previously
+best_units <- 100
+best_dropout_rate <- 0.2
+best_learning_rate <- 0.001
+
+# Function to create and compile the Keras model with the best hyperparameters
+create_best_model <- function() {
+  model <- keras_model_sequential() %>%
+    layer_dense(units = best_units, activation = 'relu', input_shape = c(num_features)) %>%
+    layer_dropout(rate = best_dropout_rate) %>%
+    layer_dense(units = best_units, activation = 'relu') %>%
+    layer_dropout(rate = best_dropout_rate) %>%
+    layer_dense(units = 1)
+
+  model %>% compile(
+    optimizer = optimizer_adam(lr = best_learning_rate),
+    loss = 'mean_squared_error',
+    metrics = c('mean_absolute_error')
+  )
+  
+  return(model)
+}
+
+# Prepare the dataset for 10-fold cross-validation
+set.seed(123) # For reproducibility
+folds <- createFolds(pd2[, 1], k = 10)
+cv_scores <- list(rmse = numeric(length(folds)), mae = numeric(length(folds)))
+
+# Perform 10-fold cross-validation
+for(k in seq_along(folds)) {
+  # Split the data into training and validation sets
+  fold <- folds[[k]]
+  training_indices <- setdiff(seq_len(nrow(pd2)), fold)
+  train_data <- pd2[training_indices, ]
+  val_data <- pd2[fold, ]
+  
+  # Prepare the data for the Keras model
+  x_train <- as.matrix(train_data[, -1])
+  y_train <- train_data[, 1]
+  x_val <- as.matrix(val_data[, -1])
+  y_val <- val_data[, 1]
+  
+  # Create and train the model
+  model <- create_best_model()
+  history <- model %>% fit(
+    x_train, y_train,
+    epochs = 100,
+    batch_size = 10,
+    validation_data = list(x_val, y_val),
+    verbose = 0
+  )
+  
+  # Evaluate the model
+  scores <- model %>% evaluate(x_val, y_val, verbose = 0)
+  
+  # Handle evaluation results based on whether 'scores' is a vector or a single value
+  rmse <- if (is.numeric(scores) && length(scores) == 1) {
+    # 'scores' is a single numeric value (the loss)
+    sqrt(scores)
+  } else {
+    # 'scores' is a named vector and contains 'loss'
+    sqrt(scores['loss'])
+  }
+  
+  mae <- if (is.numeric(scores) && length(scores) > 1 && "mean_absolute_error" %in% names(scores)) {
+    scores['mean_absolute_error']
+  } else {
+    # Get MAE from the last epoch in the training history
+    history$metrics$val_mean_absolute_error[length(history$metrics$val_mean_absolute_error)]
+  }
+  
+  # Store the RMSE and MAE for this fold
+  cv_scores$rmse[k] <- rmse
+  cv_scores$mae[k] <- mae
+}
+
+# Calculate the average RMSE and MAE across all folds
+mean_rmse <- mean(cv_scores$rmse)
+mean_mae <- mean(cv_scores$mae)
+
+# Print out the average RMSE and MAE
+cat("Average RMSE across folds:", mean_rmse, "\n")
+cat("Average MAE across folds:", mean_mae, "\n")
+
+
+```
+
+**Multicolinearity - 3** **whole data, th = 5**
+
+```{r}
+library(ISLR)
+library(MASS) # For lda function
+library(caret)
+library(e1071)
+library(caret)
+library(readxl)
+
+pd <- read_excel("/Users/chunhuigu/Desktop/train/Whole_data.xlsx")
+str(pd[, -1, drop = FALSE])
+pd_x <- as.data.frame(pd[, -1])
+vif_results3 <- usdm::vifstep(pd_x, th=5)
+vif_results3
+vif_final3 <- vif_results3@results
+final_variable_names3 <- vif_final3$Variables
+final_data3 <- pd_x[, final_variable_names3, drop = FALSE]
+pre_proc_val3 <- preProcess(final_data3, method = c("center", "scale"))
+normalized_x3 <- predict(pre_proc_val3, final_data3)
+pd3 <- cbind(pd[,1], normalized_x3)
+```
+
+**Model Selection - 3** 
+
+```{r}
+library(caret)
+library(nnet) # 神经网络模型
+
+# 添加神经网络到模型方法列表
+model_methods <- c(
+  least_squares = "lm",
+  bayes = "bayesglm",
+  lasso = "glmnet",
+  ridge = "glmnet",
+  knn = "knn",
+  nnet = "nnet" # 添加神经网络模型
+)
+
+# 初始化一个空列表来存储结果
+results <- list()
+
+# 设置交叉验证的训练控制
+train_control <- trainControl(method = "cv", number = 10, savePredictions = "final")
+
+# 执行10折交叉验证并计算测试集的RMSE和MAE
+perform_cv <- function(model_method, data, outcome_var, ...) {
+  set.seed(123) # 确保结果可重复
+  
+  # 训练模型，使用10折交叉验证
+  model <- train(reformulate(". - survival_time", response = outcome_var), 
+                 data = data, 
+                 method = model_method, 
+                 trControl = train_control,
+                 ...)
+  
+  # 提取测试集的预测
+  test_predictions <- model$pred[model$pred$Resample != "Resample01",]
+  
+  # 计算测试集的RMSE和MAE
+  rmse_test <- RMSE(test_predictions$pred, test_predictions$obs)
+  mae_test <- MAE(test_predictions$pred, test_predictions$obs)
+  
+  # 返回测试集的RMSE和MAE
+  return(c(RMSE = rmse_test, MAE = mae_test))
+}
+
+# 对每个回归模型应用函数并存储测试RMSE和MAE
+for (method_name in names(model_methods)) {
+  if (method_name %in% c("lasso", "ridge")) {
+    # 对lasso和ridge回归，指定alpha值
+    alpha_value <- ifelse(method_name == "lasso", 1, 0)
+    results[[method_name]] <- perform_cv(model_methods[[method_name]], pd1, "survival_time", 
+                                         tuneLength = 3,
+                                         tuneGrid = expand.grid(alpha = alpha_value, lambda = seq(0.001, 0.1, length = 10)))
+  } else if (method_name == "nnet") {
+    # 对神经网络，设置一个合适的隐藏层节点数和最大迭代次数
+    results[[method_name]] <- perform_cv(model_methods[[method_name]], pd1, "survival_time",
+                                         trace = FALSE,
+                                         maxit = 1000,
+                                         linout = TRUE, # 线性输出对于回归问题
+                    
+                                         tuneLength = 3)
+  } else {
+    # 对其他方法，不需要指定额外参数
+    results[[method_name]] <- perform_cv(model_methods[[method_name]], pd1, "survival_time")
+  }
+}
+
+# Add Poisson regression manually using a custom model specification in caret
+set.seed(123)
+poisson_model <- train(survival_time ~ ., data = pd3, method = "glm", family = "poisson", trControl = train_control)
+poisson_test_predictions <- poisson_model$pred[poisson_model$pred$Resample != "Resample01",]
+results[["poisson"]] <- c(RMSE = RMSE(poisson_test_predictions$pred, poisson_test_predictions$obs),
+                          MAE = MAE(poisson_test_predictions$pred, poisson_test_predictions$obs))
+
+# Compile test RMSE and MAE results into a data frame for comparison
+results_df <- data.frame(Model = names(results), t(sapply(results, unlist)))
+rownames(results_df) <- NULL # Reset row names to default
+
+# Output results
+print(results_df)
+
+```
+
+**train deep neural network - 3**
+
+```{r}
+library(keras)
+
+# 确定特征数量
+num_features <- ncol(pd3) - 1
+
+# 定义模型
+model <- keras_model_sequential() %>%
+  layer_dense(units = 64, activation = 'relu', input_shape = c(num_features)) %>%
+  layer_dense(units = 64, activation = 'relu') %>%
+  layer_dense(units = 1)
+
+# 编译模型，使用标准的RMSprop优化器
+model %>% compile(
+  loss = 'mean_squared_error',
+  optimizer = optimizer_rmsprop(),  # 使用标准的RMSprop优化器
+  metrics = c('mean_absolute_error')
+)
+
+# 10折交叉验证准备
+k <- 10  # 折数
+fold_size <- nrow(pd3) / k
+cvscores_rmse <- vector()
+cvscores_mae <- vector()
+
+for (i in 1:k) {
+  # 分割验证集和训练集
+  val_indices <- ((i - 1) * fold_size + 1):(i * fold_size)
+  val_data <- pd3[val_indices, ]
+  train_data <- pd3[-val_indices, ]
+  
+  # 训练模型
+  history <- model %>% fit(
+    x = as.matrix(train_data[, -1]),  # 特征数据，移除第一列（目标变量）
+    y = train_data[, 1],              # 目标变量
+    epochs = 100,
+    batch_size = 10,
+    verbose = 0
+  )
+  
+  # 评估模型
+  scores <- model %>% evaluate(
+    x = as.matrix(val_data[, -1]),
+    y = val_data[, 1],
+    verbose = 0
+  )
+
+  # 判断scores是否为list并且包含'loss'和'mean_absolute_error'
+  if (is.list(scores) && "loss" %in% names(scores)) {
+    rmse <- sqrt(scores$loss)
+    mae <- scores$mean_absolute_error
+  } else {  # 如果scores不是list，直接使用索引
+    rmse <- sqrt(scores[1])
+    mae <- scores[2]
+  }
+  
+  # 将结果添加到vectors中
+  cvscores_rmse <- c(cvscores_rmse, rmse)
+  cvscores_mae <- c(cvscores_mae, mae)
+}
+
+# 计算平均RMSE和MAE
+mean_rmse <- mean(cvscores_rmse)
+mean_mae <- mean(cvscores_mae)
+
+# 输出结果
+cat("平均RMSE:", mean_rmse, "\n")
+cat("平均MAE:", mean_mae, "\n")
+
+```
+
+**find the best model parameters - 3**
+
+```{r}
+library(keras)
+library(caret)
+
+# Assume pd1 is your full dataset with the first column being the target variable.
+num_features <- ncol(pd3) - 1  # Number of features
+
+# Define the grid of hyperparameters
+#grid <- expand.grid(
+#  units = c(50, 100),
+#  dropout_rate = c(0.2, 0.4),
+#  learning_rate = c(0.001, 0.01),
+#  stringsAsFactors = FALSE
+#)
+
+grid <- expand.grid(
+  units = seq(50, 200, by = 50),         # Number of units in each dense layer
+  dropout_rate = seq(0.1, 0.5, by = 0.1), # Dropout rates
+  learning_rate = c(0.001, 0.005, 0.01), # Learning rates
+  stringsAsFactors = FALSE
+)
+
+
+# Function to create a Keras model with given hyperparameters
+create_model <- function(units, dropout_rate, learning_rate) {
+  model <- keras_model_sequential() %>%
+    layer_dense(units = units, activation = 'relu', input_shape = c(num_features)) %>%
+    layer_dropout(rate = dropout_rate) %>%
+    layer_dense(units = units, activation = 'relu') %>%
+    layer_dropout(rate = dropout_rate) %>%
+    layer_dense(units = 1)
+  
+  model %>% compile(
+    optimizer = optimizer_adam(lr = learning_rate),
+    loss = 'mean_squared_error',
+    metrics = c('mean_absolute_error')
+  )
+  
+  return(model)
+}
+
+# Prepare the dataset
+set.seed(123) # For reproducibility
+folds <- createFolds(pd3[, 1], k = 10)
+cv_results <- lapply(seq_along(folds), function(k) {
+  # Split the data into training and validation sets
+  fold <- folds[[k]]
+  training_indices <- setdiff(seq_len(nrow(pd3)), fold)
+  train_data <- pd3[training_indices, ]
+  val_data <- pd3[fold, ]
+  
+  # Prepare the data for the Keras model
+  x_train <- as.matrix(train_data[, -1])
+  y_train <- train_data[, 1]
+  x_val <- as.matrix(val_data[, -1])
+  y_val <- val_data[, 1]
+  
+  # Initialize a list to store the results for each set of parameters
+  hyperparam_results <- list()
+  
+  for(i in seq_len(nrow(grid))) {
+    # Get the parameters for this iteration
+    params <- grid[i, ]
+    
+    # Create and train the model
+    model <- create_model(params$units, params$dropout_rate, params$learning_rate)
+    history <- model %>% fit(
+      x_train, y_train,
+      epochs = 100,
+      batch_size = 10,
+      validation_data = list(x_val, y_val),
+      verbose = 0
+    )
+    
+    # Get the best validation MAE from the training history
+    val_mae <- min(history$metrics$val_mean_absolute_error)
+    
+    # Store the results for this set of hyperparameters
+    hyperparam_results[[i]] <- list(params = params, val_mae = val_mae)
+  }
+  
+  # Return the results for this fold
+  return(hyperparam_results)
+})
+
+# Calculate the mean validation MAE across all folds for each set of hyperparameters
+mean_val_mae_per_hyperparam <- sapply(seq_len(nrow(grid)), function(i) {
+  mean(sapply(cv_results, function(fold_results) fold_results[[i]]$val_mae))
+})
+
+# Determine the set of hyperparameters with the best mean validation MAE
+best_hyperparams_index <- which.min(mean_val_mae_per_hyperparam)
+best_hyperparams <- grid[best_hyperparams_index, ]
+best_val_mae <- mean_val_mae_per_hyperparam[best_hyperparams_index]
+
+# Print out the best hyperparameters and corresponding validation MAE
+print(best_hyperparams)
+print(best_val_mae)
+
+```
+
+**realize the model wth the best parameters - 3**
+
+```{r}
+library(keras)
+library(caret)
+
+# Assume pd1 is your full dataset with the first column being the target variable.
+num_features <- ncol(pd3) - 1  # Number of features
+
+# Define the best hyperparameters found previously
+best_units <- 100
+best_dropout_rate <- 0.2
+best_learning_rate <- 0.001
+
+# Function to create and compile the Keras model with the best hyperparameters
+create_best_model <- function() {
+  model <- keras_model_sequential() %>%
+    layer_dense(units = best_units, activation = 'relu', input_shape = c(num_features)) %>%
+    layer_dropout(rate = best_dropout_rate) %>%
+    layer_dense(units = best_units, activation = 'relu') %>%
+    layer_dropout(rate = best_dropout_rate) %>%
+    layer_dense(units = 1)
+
+  model %>% compile(
+    optimizer = optimizer_adam(lr = best_learning_rate),
+    loss = 'mean_squared_error',
+    metrics = c('mean_absolute_error')
+  )
+  
+  return(model)
+}
+
+# Prepare the dataset for 10-fold cross-validation
+set.seed(123) # For reproducibility
+folds <- createFolds(pd3[, 1], k = 10)
+cv_scores <- list(rmse = numeric(length(folds)), mae = numeric(length(folds)))
+
+# Perform 10-fold cross-validation
+for(k in seq_along(folds)) {
+  # Split the data into training and validation sets
+  fold <- folds[[k]]
+  training_indices <- setdiff(seq_len(nrow(pd3)), fold)
+  train_data <- pd3[training_indices, ]
+  val_data <- pd3[fold, ]
+  
+  # Prepare the data for the Keras model
+  x_train <- as.matrix(train_data[, -1])
+  y_train <- train_data[, 1]
+  x_val <- as.matrix(val_data[, -1])
+  y_val <- val_data[, 1]
+  
+  # Create and train the model
+  model <- create_best_model()
+  history <- model %>% fit(
+    x_train, y_train,
+    epochs = 100,
+    batch_size = 10,
+    validation_data = list(x_val, y_val),
+    verbose = 0
+  )
+  
+  # Evaluate the model
+  scores <- model %>% evaluate(x_val, y_val, verbose = 0)
+  
+  # Handle evaluation results based on whether 'scores' is a vector or a single value
+  rmse <- if (is.numeric(scores) && length(scores) == 1) {
+    # 'scores' is a single numeric value (the loss)
+    sqrt(scores)
+  } else {
+    # 'scores' is a named vector and contains 'loss'
+    sqrt(scores['loss'])
+  }
+  
+  mae <- if (is.numeric(scores) && length(scores) > 1 && "mean_absolute_error" %in% names(scores)) {
+    scores['mean_absolute_error']
+  } else {
+    # Get MAE from the last epoch in the training history
+    history$metrics$val_mean_absolute_error[length(history$metrics$val_mean_absolute_error)]
+  }
+  
+  # Store the RMSE and MAE for this fold
+  cv_scores$rmse[k] <- rmse
+  cv_scores$mae[k] <- mae
+}
+
+# Calculate the average RMSE and MAE across all folds
+mean_rmse <- mean(cv_scores$rmse)
+mean_mae <- mean(cv_scores$mae)
+
+# Print out the average RMSE and MAE
+cat("Average RMSE across folds:", mean_rmse, "\n")
+cat("Average MAE across folds:", mean_mae, "\n")
+
+
+```
+
+**Multicolinearity - 4** **whole data, th = 10**
+
+```{r}
+library(ISLR)
+library(MASS) # For lda function
+library(caret)
+library(e1071)
+library(caret)
+library(readxl)
+
+pd <- read_excel("/Users/chunhuigu/Desktop/train/Whole_data.xlsx")
+str(pd[, -1, drop = FALSE])
+pd_x <- as.data.frame(pd[, -1])
+vif_results4 <- usdm::vifstep(pd_x, th=10)
+vif_results4
+vif_final4 <- vif_results4@results
+final_variable_names4 <- vif_final4$Variables
+final_data4 <- pd_x[, final_variable_names4, drop = FALSE]
+pd4 <- cbind(pd[,1], final_data4)
+```
+
+**Model Selection - 4**
+
+```{r}
+library(caret)
+library(glmnet)
+
+# Update the method list with a correct entry for Poisson using glm with the Poisson family
+model_methods <- list(
+  least_squares = "lm",
+  bayes = "bayesglm",
+  lasso = "glmnet",
+  ridge = "glmnet"
+)
+
+# Initialize an empty list to store results
+results <- list()
+
+# Train control set up for repeated CV and prediction saving
+train_control <- trainControl(method = "cv", number = 10, savePredictions = "final")
+
+# Function to perform 10-fold CV and compute RMSE for the test set
+perform_cv <- function(model_method, data, outcome_var, alpha = NULL) {
+  set.seed(123) # for reproducibility
+  
+  # Train the model using 10-fold CV
+  if (!is.null(alpha)) {
+    # For glmnet (lasso or ridge) we specify the alpha value
+    model <- train(reformulate(". - survival_time", response = outcome_var), 
+                   data = data, 
+                   method = model_method, 
+                   trControl = train_control, 
+                   tuneLength = 3, 
+                   tuneGrid = expand.grid(alpha = alpha, lambda = seq(0.001, 0.1, length = 10)))
+  } else {
+    # For other methods (lm or bayesglm) we do not need the alpha value
+    model <- train(reformulate(". - survival_time", response = outcome_var), 
+                   data = data, 
+                   method = model_method, 
+                   trControl = train_control)
+  }
+  
+  # Extract predictions for the test set
+  test_predictions <- model$pred[model$pred$Resample != "Resample01",]
+  
+  # Calculate RMSE for the test set
+  rmse_test <- RMSE(test_predictions$pred, test_predictions$obs)
+  
+  # Return the RMSE for the test set
+  return(rmse_test)
+}
+
+# Apply the function to each regression model and store the test RMSE
+for (method_name in names(model_methods)) {
+  if (method_name == "lasso" || method_name == "ridge") {
+    # For lasso and ridge regression, specify the alpha value
+    alpha_value <- ifelse(method_name == "lasso", 1, 0)
+    results[[method_name]] <- perform_cv(model_methods[[method_name]], pd1, "survival_time", alpha_value)
+  } else {
+    # For other methods, we don't need to specify alpha
+    results[[method_name]] <- perform_cv(model_methods[[method_name]], pd1, "survival_time")
+  }
+}
+
+# Add Poisson regression manually using a custom model specification in caret
+set.seed(123)
+poisson_model <- train(survival_time ~ ., data = pd4, method = "glm", family = "poisson", trControl = train_control)
+poisson_test_predictions <- poisson_model$pred[poisson_model$pred$Resample != "Resample01",]
+poisson_rmse_test <- RMSE(poisson_test_predictions$pred, poisson_test_predictions$obs)
+results[["poisson"]] <- poisson_rmse_test
+
+# Compile test RMSE results into a data frame for comparison
+results_df <- data.frame(Model = names(results), RMSE_Test = unlist(results))
+rownames(results_df) <- NULL # Reset row names to default
+
+# Output results
+print(results_df)
+```
+
+**train deep neural network - 4**
+
+```{r}
+library(keras)
+
+# 确定特征数量
+num_features <- ncol(pd4) - 1
+
+# 定义模型
+model <- keras_model_sequential() %>%
+  layer_dense(units = 64, activation = 'relu', input_shape = c(num_features)) %>%
+  layer_dense(units = 64, activation = 'relu') %>%
+  layer_dense(units = 1)
+
+# 编译模型，使用标准的RMSprop优化器
+model %>% compile(
+  loss = 'mean_squared_error',
+  optimizer = optimizer_rmsprop(),  # 使用标准的RMSprop优化器
+  metrics = c('mean_absolute_error')
+)
+
+# 10折交叉验证准备
+k <- 10  # 折数
+fold_size <- nrow(pd4) / k
+cvscores_rmse <- vector()
+cvscores_mae <- vector()
+
+for (i in 1:k) {
+  # 分割验证集和训练集
+  val_indices <- ((i - 1) * fold_size + 1):(i * fold_size)
+  val_data <- pd4[val_indices, ]
+  train_data <- pd4[-val_indices, ]
+  
+  # 训练模型
+  history <- model %>% fit(
+    x = as.matrix(train_data[, -1]),  # 特征数据，移除第一列（目标变量）
+    y = train_data[, 1],              # 目标变量
+    epochs = 100,
+    batch_size = 10,
+    verbose = 0
+  )
+  
+  # 评估模型
+  scores <- model %>% evaluate(
+    x = as.matrix(val_data[, -1]),
+    y = val_data[, 1],
+    verbose = 0
+  )
+
+  # 判断scores是否为list并且包含'loss'和'mean_absolute_error'
+  if (is.list(scores) && "loss" %in% names(scores)) {
+    rmse <- sqrt(scores$loss)
+    mae <- scores$mean_absolute_error
+  } else {  # 如果scores不是list，直接使用索引
+    rmse <- sqrt(scores[1])
+    mae <- scores[2]
+  }
+  
+  # 将结果添加到vectors中
+  cvscores_rmse <- c(cvscores_rmse, rmse)
+  cvscores_mae <- c(cvscores_mae, mae)
+}
+
+# 计算平均RMSE和MAE
+mean_rmse <- mean(cvscores_rmse)
+mean_mae <- mean(cvscores_mae)
+
+# 输出结果
+cat("平均RMSE:", mean_rmse, "\n")
+cat("平均MAE:", mean_mae, "\n")
+
+```
+
+**find the best model parameters - 4**
+
+```{r}
+library(keras)
+library(caret)
+
+# Assume pd1 is your full dataset with the first column being the target variable.
+num_features <- ncol(pd4) - 1  # Number of features
+
+# Define the grid of hyperparameters
+#grid <- expand.grid(
+#  units = c(50, 100),
+#  dropout_rate = c(0.2, 0.4),
+#  learning_rate = c(0.001, 0.01),
+#  stringsAsFactors = FALSE
+#)
+
+grid <- expand.grid(
+  units = seq(50, 200, by = 50),         # Number of units in each dense layer
+  dropout_rate = seq(0.1, 0.5, by = 0.1), # Dropout rates
+  learning_rate = c(0.001, 0.005, 0.01), # Learning rates
+  stringsAsFactors = FALSE
+)
+
+
+# Function to create a Keras model with given hyperparameters
+create_model <- function(units, dropout_rate, learning_rate) {
+  model <- keras_model_sequential() %>%
+    layer_dense(units = units, activation = 'relu', input_shape = c(num_features)) %>%
+    layer_dropout(rate = dropout_rate) %>%
+    layer_dense(units = units, activation = 'relu') %>%
+    layer_dropout(rate = dropout_rate) %>%
+    layer_dense(units = 1)
+  
+  model %>% compile(
+    optimizer = optimizer_adam(lr = learning_rate),
+    loss = 'mean_squared_error',
+    metrics = c('mean_absolute_error')
+  )
+  
+  return(model)
+}
+
+# Prepare the dataset
+set.seed(123) # For reproducibility
+folds <- createFolds(pd4[, 1], k = 10)
+cv_results <- lapply(seq_along(folds), function(k) {
+  # Split the data into training and validation sets
+  fold <- folds[[k]]
+  training_indices <- setdiff(seq_len(nrow(pd4)), fold)
+  train_data <- pd4[training_indices, ]
+  val_data <- pd4[fold, ]
+  
+  # Prepare the data for the Keras model
+  x_train <- as.matrix(train_data[, -1])
+  y_train <- train_data[, 1]
+  x_val <- as.matrix(val_data[, -1])
+  y_val <- val_data[, 1]
+  
+  # Initialize a list to store the results for each set of parameters
+  hyperparam_results <- list()
+  
+  for(i in seq_len(nrow(grid))) {
+    # Get the parameters for this iteration
+    params <- grid[i, ]
+    
+    # Create and train the model
+    model <- create_model(params$units, params$dropout_rate, params$learning_rate)
+    history <- model %>% fit(
+      x_train, y_train,
+      epochs = 100,
+      batch_size = 10,
+      validation_data = list(x_val, y_val),
+      verbose = 0
+    )
+    
+    # Get the best validation MAE from the training history
+    val_mae <- min(history$metrics$val_mean_absolute_error)
+    
+    # Store the results for this set of hyperparameters
+    hyperparam_results[[i]] <- list(params = params, val_mae = val_mae)
+  }
+  
+  # Return the results for this fold
+  return(hyperparam_results)
+})
+
+# Calculate the mean validation MAE across all folds for each set of hyperparameters
+mean_val_mae_per_hyperparam <- sapply(seq_len(nrow(grid)), function(i) {
+  mean(sapply(cv_results, function(fold_results) fold_results[[i]]$val_mae))
+})
+
+# Determine the set of hyperparameters with the best mean validation MAE
+best_hyperparams_index <- which.min(mean_val_mae_per_hyperparam)
+best_hyperparams <- grid[best_hyperparams_index, ]
+best_val_mae <- mean_val_mae_per_hyperparam[best_hyperparams_index]
+
+# Print out the best hyperparameters and corresponding validation MAE
+print(best_hyperparams)
+print(best_val_mae)
+
+```
+
+**realize the model wth the best parameters - 4**
+
+```{r}
+library(keras)
+library(caret)
+
+# Assume pd1 is your full dataset with the first column being the target variable.
+num_features <- ncol(pd4) - 1  # Number of features
+
+# Define the best hyperparameters found previously
+best_units <- 100
+best_dropout_rate <- 0.2
+best_learning_rate <- 0.001
+
+# Function to create and compile the Keras model with the best hyperparameters
+create_best_model <- function() {
+  model <- keras_model_sequential() %>%
+    layer_dense(units = best_units, activation = 'relu', input_shape = c(num_features)) %>%
+    layer_dropout(rate = best_dropout_rate) %>%
+    layer_dense(units = best_units, activation = 'relu') %>%
+    layer_dropout(rate = best_dropout_rate) %>%
+    layer_dense(units = 1)
+
+  model %>% compile(
+    optimizer = optimizer_adam(lr = best_learning_rate),
+    loss = 'mean_squared_error',
+    metrics = c('mean_absolute_error')
+  )
+  
+  return(model)
+}
+
+# Prepare the dataset for 10-fold cross-validation
+set.seed(123) # For reproducibility
+folds <- createFolds(pd4[, 1], k = 10)
+cv_scores <- list(rmse = numeric(length(folds)), mae = numeric(length(folds)))
+
+# Perform 10-fold cross-validation
+for(k in seq_along(folds)) {
+  # Split the data into training and validation sets
+  fold <- folds[[k]]
+  training_indices <- setdiff(seq_len(nrow(pd4)), fold)
+  train_data <- pd4[training_indices, ]
+  val_data <- pd4[fold, ]
+  
+  # Prepare the data for the Keras model
+  x_train <- as.matrix(train_data[, -1])
+  y_train <- train_data[, 1]
+  x_val <- as.matrix(val_data[, -1])
+  y_val <- val_data[, 1]
+  
+  # Create and train the model
+  model <- create_best_model()
+  history <- model %>% fit(
+    x_train, y_train,
+    epochs = 100,
+    batch_size = 10,
+    validation_data = list(x_val, y_val),
+    verbose = 0
+  )
+  
+  # Evaluate the model
+  scores <- model %>% evaluate(x_val, y_val, verbose = 0)
+  
+  # Handle evaluation results based on whether 'scores' is a vector or a single value
+  rmse <- if (is.numeric(scores) && length(scores) == 1) {
+    # 'scores' is a single numeric value (the loss)
+    sqrt(scores)
+  } else {
+    # 'scores' is a named vector and contains 'loss'
+    sqrt(scores['loss'])
+  }
+  
+  mae <- if (is.numeric(scores) && length(scores) > 1 && "mean_absolute_error" %in% names(scores)) {
+    scores['mean_absolute_error']
+  } else {
+    # Get MAE from the last epoch in the training history
+    history$metrics$val_mean_absolute_error[length(history$metrics$val_mean_absolute_error)]
+  }
+  
+  # Store the RMSE and MAE for this fold
+  cv_scores$rmse[k] <- rmse
+  cv_scores$mae[k] <- mae
+}
+
+# Calculate the average RMSE and MAE across all folds
+mean_rmse <- mean(cv_scores$rmse)
+mean_mae <- mean(cv_scores$mae)
+
+# Print out the average RMSE and MAE
+cat("Average RMSE across folds:", mean_rmse, "\n")
+cat("Average MAE across folds:", mean_mae, "\n")
+
+
+```
