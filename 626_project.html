@@ -1399,9 +1399,9 @@ mean_mae &lt;- mean(cvscores_mae)
 
 # 输出结果
 cat(&quot;平均RMSE:&quot;, mean_rmse, &quot;\n&quot;)</code></pre>
-<pre><code>## 平均RMSE: 60.67345</code></pre>
+<pre><code>## 平均RMSE: 61.23712</code></pre>
 <pre class="r"><code>cat(&quot;平均MAE:&quot;, mean_mae, &quot;\n&quot;)</code></pre>
-<pre><code>## 平均MAE: 48.67226</code></pre>
+<pre><code>## 平均MAE: 48.80742</code></pre>
 <p><strong>Multicolinearity - 2</strong> <strong>partial data, th =
 10</strong></p>
 <pre class="r"><code>library(ISLR)
@@ -2448,9 +2448,9 @@ mean_mae &lt;- mean(cvscores_mae)
 
 # 输出结果
 cat(&quot;平均RMSE:&quot;, mean_rmse, &quot;\n&quot;)</code></pre>
-<pre><code>## 平均RMSE: 66.30362</code></pre>
+<pre><code>## 平均RMSE: 87.64757</code></pre>
 <pre class="r"><code>cat(&quot;平均MAE:&quot;, mean_mae, &quot;\n&quot;)</code></pre>
-<pre><code>## 平均MAE: 53.444</code></pre>
+<pre><code>## 平均MAE: 69.34794</code></pre>
 <p><strong>Multicolinearity - 3</strong> <strong>whole data, th =
 5</strong></p>
 <pre class="r"><code>library(ISLR)
@@ -2830,9 +2830,9 @@ mean_mae &lt;- mean(cvscores_mae)
 
 # 输出结果
 cat(&quot;平均RMSE:&quot;, mean_rmse, &quot;\n&quot;)</code></pre>
-<pre><code>## 平均RMSE: 69.84944</code></pre>
+<pre><code>## 平均RMSE: 81.16857</code></pre>
 <pre class="r"><code>cat(&quot;平均MAE:&quot;, mean_mae, &quot;\n&quot;)</code></pre>
-<pre><code>## 平均MAE: 55.2693</code></pre>
+<pre><code>## 平均MAE: 64.90408</code></pre>
 <p><strong>Multicolinearity - 4</strong> <strong>whole data, th =
 10</strong></p>
 <pre class="r"><code>library(ISLR)
@@ -3224,9 +3224,74 @@ mean_mae &lt;- mean(cvscores_mae)
 
 # 输出结果
 cat(&quot;平均RMSE:&quot;, mean_rmse, &quot;\n&quot;)</code></pre>
-<pre><code>## 平均RMSE: 78.44377</code></pre>
+<pre><code>## 平均RMSE: 78.72395</code></pre>
 <pre class="r"><code>cat(&quot;平均MAE:&quot;, mean_mae, &quot;\n&quot;)</code></pre>
-<pre><code>## 平均MAE: 63.0103</code></pre>
+<pre><code>## 平均MAE: 62.28667</code></pre>
+<pre class="r"><code>library(caret)
+library(class) # KNN模型
+
+# 假设你的test数据集已经被正确读取到这个变量中
+ test &lt;- read_excel(&quot;/Users/chunhuigu/Desktop/test/test_data.xlsx&quot;)
+
+# 读取pd1数据集和test数据集
+# pd1 &lt;- read.csv(&quot;path_to_your_train_dataset.csv&quot;)
+# test &lt;- read.csv(&quot;path_to_your_test_dataset.csv&quot;)
+
+# 从pd1中分离出y变量和x变量
+y_train &lt;- pd1[, 1]
+x_train &lt;- pd1[, -1]
+
+# 设置交叉验证的训练控制
+train_control &lt;- trainControl(method = &quot;cv&quot;, number = 10, savePredictions = &quot;final&quot;)
+
+# 网格搜索中的K值列表
+k_values &lt;- c(1, 3, 5, 7, 9, 11, 13, 15, 17, 19, 21)
+
+# KNN模型的网格定义
+knn_tune_grid &lt;- expand.grid(k = k_values)
+
+# 执行KNN模型的网格搜索
+set.seed(123)
+knn_model &lt;- train(survival_time ~ ., data = pd1, method = &quot;knn&quot;,
+                   tuneGrid = knn_tune_grid,
+                   trControl = train_control)
+
+# 使用最佳的K值对test数据集进行预测
+predictions &lt;- predict(knn_model, newdata = test)
+
+# 将预测结果保存到CSV文件中
+write.csv(predictions, file = &quot;predictions.csv&quot;, row.names = FALSE)
+
+# 打印出选择的最佳模型的k值和模型总结
+best_k &lt;- knn_model$bestTune$k
+print(paste(&quot;The best K value is:&quot;, best_k))</code></pre>
+<pre><code>## [1] &quot;The best K value is: 21&quot;</code></pre>
+<pre class="r"><code>print(knn_model)</code></pre>
+<pre><code>## k-Nearest Neighbors 
+## 
+## 225 samples
+##  37 predictor
+## 
+## No pre-processing
+## Resampling: Cross-Validated (10 fold) 
+## Summary of sample sizes: 203, 201, 202, 203, 202, 204, ... 
+## Resampling results across tuning parameters:
+## 
+##   k   RMSE      Rsquared    MAE     
+##    1  65.90796  0.02608722  51.41515
+##    3  55.17608  0.04066931  43.92890
+##    5  53.46260  0.02950588  42.96886
+##    7  52.26459  0.05373604  41.81286
+##    9  50.14111  0.05462072  39.82395
+##   11  50.05059  0.05492645  39.68579
+##   13  50.62457  0.07179632  40.38256
+##   15  50.24424  0.07585971  40.21823
+##   17  49.39304  0.07520244  39.51724
+##   19  49.13810  0.06656149  39.32531
+##   21  49.12616  0.07352456  39.52579
+## 
+## RMSE was used to select the optimal model using the smallest value.
+## The final value used for the model was k = 21.</code></pre>
 
 
 
